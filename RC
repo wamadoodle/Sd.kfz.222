@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#101820">
+  <title>SdKfz222 RC</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #101820;
+      color: #edf2f4;
+      font-synthesis: none;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; }
+    button { font: inherit; color: inherit; }
+    .app { width: min(760px, 100%); margin: 0 auto; padding: 18px 16px 28px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    h1 { margin: 0; font-size: 1.25rem; letter-spacing: .04em; }
+    .connection { display: flex; align-items: center; gap: 8px; color: #b6c2c9; font-size: .86rem; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #d78b36; }
+    .dot.online { background: #54d18b; }
+    .connect, .mode-button, .toggle {
+      border: 1px solid #3b4b56;
+      background: #1a2731;
+      border-radius: 12px;
+      min-height: 44px;
+      padding: 9px 14px;
+      cursor: pointer;
+    }
+    .connect { margin: 18px 0 14px; width: 100%; background: #b7d96c; color: #16200d; font-weight: 750; border: 0; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .card { background: #17232c; border: 1px solid #2a3944; border-radius: 18px; padding: 15px; margin-top: 14px; }
+    .section-title { display: flex; align-items: baseline; justify-content: space-between; margin: 0 0 12px; font-size: .98rem; }
+    .subtle { color: #9cabb4; font-size: .78rem; }
+    .mode-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .mode-button.active { background: #b7d96c; color: #16200d; border-color: #b7d96c; font-weight: 750; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .stick-wrap { text-align: center; min-width: 0; }
+    .stick {
+      position: relative;
+      width: min(40vw, 190px);
+      height: min(40vw, 190px);
+      max-width: 190px;
+      max-height: 190px;
+      min-width: 132px;
+      min-height: 132px;
+      margin: 0 auto;
+      border-radius: 50%;
+      border: 1px solid #50616c;
+      background:
+        linear-gradient(90deg, transparent 49.5%, #34434d 49.5%, #34434d 50.5%, transparent 50.5%),
+        linear-gradient(transparent 49.5%, #34434d 49.5%, #34434d 50.5%, transparent 50.5%),
+        radial-gradient(circle, #263640 0, #1b2932 68%, #17232c 69%);
+      touch-action: none;
+      user-select: none;
+    }
+    .stick::before, .stick::after { content: ""; position: absolute; background: #34434d; }
+    .stick::before { width: 1px; height: 100%; left: 50%; top: 0; }
+    .stick::after { height: 1px; width: 100%; top: 50%; left: 0; }
+    .knob {
+      position: absolute; z-index: 1; width: 54px; height: 54px;
+      left: 50%; top: 50%; transform: translate(-50%, -50%);
+      border-radius: 50%; border: 2px solid #d8e5bc;
+      background: #9ab858; box-shadow: 0 4px 14px #0008;
+      pointer-events: none;
+    }
+    .axis-value { min-height: 1.2em; margin-top: 7px; color: #b7d96c; font-variant-numeric: tabular-nums; font-size: .82rem; }
+    .toggles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
+    .toggle { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 10px 5px; }
+    .toggle.active { border-color: #b7d96c; color: #d7efa2; background: #25331f; }
+    .toggle .state { color: #9cabb4; font-size: .72rem; }
+    .toggle.active .state { color: #b7d96c; }
+    .telemetry { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .reading { padding: 10px 12px; background: #111b22; border-radius: 12px; }
+    .reading-label { display: block; color: #9cabb4; font-size: .72rem; }
+    .reading-value { display: block; margin-top: 3px; font-size: 1rem; font-variant-numeric: tabular-nums; }
+    .notice { color: #b8c4cb; line-height: 1.45; font-size: .8rem; margin: 12px 2px 0; }
+    .error { color: #ffb4a9; min-height: 1.3em; font-size: .82rem; margin-top: 8px; }
+    @media (max-width: 390px) {
+      .app { padding-inline: 11px; }
+      .card { padding: 12px; }
+      .stick { min-width: 124px; min-height: 124px; }
+      .knob { width: 48px; height: 48px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header>
+      <h1>SdKfz222 <span class="subtle">BLE RC</span></h1>
+      <div class="connection"><span class="dot" id="statusDot"></span><span id="statusText">Disconnected</span></div>
+    </header>
+
+    <button class="connect" id="connectButton">Connect to robot</button>
+
+    <section class="card">
+      <h2 class="section-title">Drive mode <span class="subtle" id="modeStatus">RC selected</span></h2>
+      <div class="mode-row">
+        <button class="mode-button active" id="rcMode">RC</button>
+        <button class="mode-button" id="autoMode" disabled>Auto</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="section-title">RC controls <span class="subtle">Hold and drag</span></h2>
+      <div class="controls">
+        <div class="stick-wrap">
+          <div class="stick" id="driveStick" role="application" aria-label="Drive joystick">
+            <div class="knob"></div>
+          </div>
+          <div class="axis-value" id="driveValue">Throttle 0 · Steer 0</div>
+          <div class="subtle">Drive</div>
+        </div>
+        <div class="stick-wrap">
+          <div class="stick" id="turretStick" role="application" aria-label="Turret joystick">
+            <div class="knob"></div>
+          </div>
+          <div class="axis-value" id="turretValue">Pan 0</div>
+          <div class="subtle">Turret pan</div>
+        </div>
+      </div>
+      <p class="notice">Motor enable jumpers mean fixed-speed drive: the stick controls direction and steering, not speed. Use on a clear surface and keep the robot in reach.</p>
+    </section>
+
+    <section class="card">
+      <h2 class="section-title">Robot features <span class="subtle">Tap to toggle</span></h2>
+      <div class="toggles">
+        <button class="toggle" id="panToggle" aria-pressed="false"><span>Obstacle pan</span><span class="state">Off</span></button>
+        <button class="toggle" id="laserToggle" aria-pressed="false"><span>Laser</span><span class="state">Off</span></button>
+        <button class="toggle" id="musicToggle" aria-pressed="false"><span>Music</span><span class="state">Off</span></button>
+      </div>
+      <p class="notice">Laser automatically turns off after 5 seconds as a firmware safety limit. Obstacle pan requires an available ToF sensor.</p>
+    </section>
+
+    <section class="card">
+      <h2 class="section-title">Telemetry <span class="subtle" id="telemetryAge">Waiting for data</span></h2>
+      <div class="telemetry">
+        <div class="reading"><span class="reading-label">Distance</span><span class="reading-value" id="distanceValue">—</span></div>
+        <div class="reading"><span class="reading-label">ToF sensor</span><span class="reading-value" id="tofValue">Unknown</span></div>
+      </div>
+    </section>
+    <div class="error" id="errorText" role="status" aria-live="polite"></div>
+  </main>
+
+  <script>
+    (() => {
+      const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+      const RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+      const TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+      const encoder = new TextEncoder();
+      const $ = (id) => document.getElementById(id);
+      const state = {
+        device: null, server: null, rx: null, tx: null,
+        mode: "RC", tofAvailable: false, haveTelemetry: false,
+        driveActive: false, driveX: 0, driveY: 0, turretX: 0,
+        pan: false, laser: false, music: false,
+        writeChain: Promise.resolve(), lastTelemetryAt: 0, laserTimer: 0,
+        sendTimer: 0
+      };
+
+      function showError(message) {
+        $("errorText").textContent = message || "";
+      }
+
+      function setConnected(connected) {
+        $("statusDot").classList.toggle("online", connected);
+        $("statusText").textContent = connected ? "Connected" : "Disconnected";
+        $("connectButton").textContent = connected ? "Disconnect" : "Connect to robot";
+        $("connectButton").disabled = false;
+        document.querySelectorAll(".toggle, .mode-button").forEach((button) => {
+          button.disabled = !connected || (button.id === "autoMode" && !state.tofAvailable);
+        });
+        if (!connected) {
+          state.rx = null;
+          state.tx = null;
+          state.server = null;
+          state.device = null;
+          state.mode = "RC";
+          state.pan = false;
+          state.laser = false;
+          state.music = false;
+          state.driveActive = false;
+          clearTimeout(state.laserTimer);
+          updateMode();
+          updateToggle("panToggle", false);
+          updateToggle("laserToggle", false);
+          updateToggle("musicToggle", false);
+          releaseDrive();
+        }
+      }
+
+      function updateMode() {
+        $("rcMode").classList.toggle("active", state.mode === "RC");
+        $("autoMode").classList.toggle("active", state.mode === "AUTO");
+        $("modeStatus").textContent = `${state.mode} selected`;
+      }
+
+      function updateToggle(id, active) {
+        const button = $(id);
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", String(active));
+        button.querySelector(".state").textContent = active ? "On" : "Off";
+      }
+
+      function sendCommand(command) {
+        if (!state.rx || !state.server?.connected) {
+          return Promise.reject(new Error("Not connected to the robot."));
+        }
+        state.writeChain = state.writeChain.then(async () => {
+          const bytes = encoder.encode(command);
+          if (typeof state.rx.writeValueWithoutResponse === "function") {
+            await state.rx.writeValueWithoutResponse(bytes);
+          } else {
+            await state.rx.writeValue(bytes);
+          }
+        });
+        return state.writeChain.catch((error) => {
+          showError(`BLE write failed: ${error.message}`);
+          throw error;
+        });
+      }
+
+      function trySend(command) {
+        sendCommand(command).catch(() => {});
+      }
+
+      function handleTelemetry(event) {
+        const text = new TextDecoder().decode(event.target.value).trim();
+        const match = text.match(/T,\d+,([^,\r\n]+),([01])/);
+        if (!match) return;
+        state.haveTelemetry = true;
+        state.tofAvailable = match[2] === "1";
+        state.lastTelemetryAt = Date.now();
+        $("distanceValue").textContent = match[1] === "NA" ? "No reading" : `${match[1]} mm`;
+        $("tofValue").textContent = state.tofAvailable ? "Available" : "Unavailable";
+        $("telemetryAge").textContent = "Live";
+        $("autoMode").disabled = !state.server?.connected || !state.tofAvailable;
+      }
+
+      async function disconnect() {
+        clearTimeout(state.laserTimer);
+        if (state.rx && state.server?.connected) {
+          for (const command of ["J,0,0", "L,0", "M,0", "P,0"]) {
+            try { await sendCommand(command); } catch { break; }
+          }
+        }
+        if (state.device?.gatt?.connected) state.device.gatt.disconnect();
+        setConnected(false);
+        showError("");
+      }
+
+      async function connect() {
+        if (!navigator.bluetooth) {
+          showError("Web Bluetooth is unavailable. Open this page in Chrome on Android using an HTTPS address.");
+          return;
+        }
+        $("connectButton").disabled = true;
+        showError("");
+        try {
+          const device = await navigator.bluetooth.requestDevice({
+            filters: [{ name: "SdKfz222" }],
+            optionalServices: [SERVICE_UUID]
+          });
+          state.device = device;
+          device.addEventListener("gattserverdisconnected", () => {
+            setConnected(false);
+            showError("Robot disconnected. Motors and laser are stopped by firmware.");
+          });
+          state.server = await device.gatt.connect();
+          const service = await state.server.getPrimaryService(SERVICE_UUID);
+          state.rx = await service.getCharacteristic(RX_UUID);
+          state.tx = await service.getCharacteristic(TX_UUID);
+          await state.tx.startNotifications();
+          state.tx.addEventListener("characteristicvaluechanged", handleTelemetry);
+          setConnected(true);
+          state.mode = "RC";
+          state.pan = false;
+          state.laser = false;
+          state.music = false;
+          updateMode();
+          updateToggle("panToggle", false);
+          updateToggle("laserToggle", false);
+          updateToggle("musicToggle", false);
+          await sendCommand("MODE,RC");
+          await sendCommand("P,0");
+          await sendCommand("L,0");
+          await sendCommand("M,0");
+          showError("");
+        } catch (error) {
+          if (state.device?.gatt?.connected) state.device.gatt.disconnect();
+          setConnected(false);
+          showError(`Connection failed: ${error.message}`);
+        } finally {
+          $("connectButton").disabled = false;
+        }
+      }
+
+      function releaseDrive() {
+        state.driveActive = false;
+        state.driveX = 0;
+        state.driveY = 0;
+        $("driveValue").textContent = "Throttle 0 · Steer 0";
+        const knob = $("driveStick").querySelector(".knob");
+        knob.style.left = "50%";
+        knob.style.top = "50%";
+        if (state.rx && state.mode === "RC") trySend("J,0,0");
+      }
+
+      function setDriveFromStick(x, y) {
+        state.driveActive = true;
+        state.driveX = Math.round(x * 100);
+        state.driveY = Math.round(-y * 100);
+        $("driveValue").textContent = `Throttle ${state.driveY} · Steer ${state.driveX}`;
+        if (state.mode === "RC") trySend(`J,${state.driveY},${state.driveX}`);
+      }
+
+      function setupStick(element, onMove, onRelease, horizontalOnly = false) {
+        const knob = element.querySelector(".knob");
+        let pointer = null;
+        function update(event) {
+          const bounds = element.getBoundingClientRect();
+          const cx = bounds.left + bounds.width / 2;
+          const cy = bounds.top + bounds.height / 2;
+          const limit = bounds.width * 0.34;
+          let dx = event.clientX - cx;
+          let dy = horizontalOnly ? 0 : event.clientY - cy;
+          const length = Math.hypot(dx, dy);
+          if (length > limit) {
+            dx = dx / length * limit;
+            dy = dy / length * limit;
+          }
+          const nx = dx / limit;
+          const ny = dy / limit;
+          knob.style.left = `calc(50% + ${dx}px)`;
+          knob.style.top = `calc(50% + ${dy}px)`;
+          onMove(nx, ny);
+        }
+        element.addEventListener("pointerdown", (event) => {
+          event.preventDefault();
+          pointer = event.pointerId;
+          element.setPointerCapture(pointer);
+          update(event);
+        });
+        element.addEventListener("pointermove", (event) => {
+          if (event.pointerId === pointer) update(event);
+        });
+        const end = (event) => {
+          if (event.pointerId !== pointer) return;
+          pointer = null;
+          knob.style.left = "50%";
+          if (!horizontalOnly) knob.style.top = "50%";
+          onRelease();
+        };
+        element.addEventListener("pointerup", end);
+        element.addEventListener("pointercancel", end);
+        element.addEventListener("lostpointercapture", end);
+      }
+
+      setupStick($("driveStick"), setDriveFromStick, releaseDrive);
+      setupStick($("turretStick"), (x) => {
+        state.turretX = Math.round(x * 100);
+        $("turretValue").textContent = `Pan ${state.turretX}`;
+        if (state.mode === "RC") trySend(`T,${state.turretX}`);
+      }, () => {}, true);
+
+      $("connectButton").addEventListener("click", () => {
+        if (state.server?.connected) disconnect();
+        else connect();
+      });
+      $("rcMode").addEventListener("click", async () => {
+        try {
+          await sendCommand("J,0,0");
+          await sendCommand("MODE,RC");
+          state.mode = "RC";
+          updateMode();
+        } catch (error) { showError(error.message); }
+      });
+      $("autoMode").addEventListener("click", async () => {
+        if (!state.tofAvailable) return;
+        try {
+          await sendCommand("J,0,0");
+          await sendCommand("MODE,AUTO");
+          state.mode = "AUTO";
+          updateMode();
+        } catch (error) { showError(error.message); }
+      });
+
+      $("panToggle").addEventListener("click", async () => {
+        const next = !state.pan;
+        try {
+          await sendCommand(`P,${next ? 1 : 0}`);
+          state.pan = next;
+          updateToggle("panToggle", next);
+        } catch (error) { showError(error.message); }
+      });
+      $("laserToggle").addEventListener("click", async () => {
+        const next = !state.laser;
+        try {
+          await sendCommand(`L,${next ? 1 : 0}`);
+          state.laser = next;
+          updateToggle("laserToggle", next);
+          clearTimeout(state.laserTimer);
+          if (next) {
+            state.laserTimer = setTimeout(() => {
+              state.laser = false;
+              updateToggle("laserToggle", false);
+            }, 5000);
+          }
+        } catch (error) { showError(error.message); }
+      });
+      $("musicToggle").addEventListener("click", async () => {
+        const next = !state.music;
+        try {
+          await sendCommand(`M,${next ? 1 : 0}`);
+          state.music = next;
+          updateToggle("musicToggle", next);
+        } catch (error) { showError(error.message); }
+      });
+
+      setInterval(() => {
+        if (state.driveActive && state.mode === "RC" && state.server?.connected) {
+          trySend(`J,${state.driveY},${state.driveX}`);
+        }
+        if (state.haveTelemetry && Date.now() - state.lastTelemetryAt > 1500) {
+          $("telemetryAge").textContent = "Signal stale";
+        }
+      }, 120);
+    })();
+  </script>
+</body>
+</html>
