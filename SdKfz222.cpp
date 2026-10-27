@@ -37,8 +37,7 @@ constexpr uint32_t TOF_FRESHNESS_MS = 200;
 constexpr uint16_t OBSTACLE_ALARM_FREQUENCY_HZ = 2200;
 constexpr uint32_t OBSTACLE_ALARM_DURATION_MS = 350;
 constexpr uint32_t AUTO_TURN_MS_PER_DEG = 7;
-constexpr int AUTO_FALLBACK_TURN_DEGREES = 90;
-constexpr uint32_t AUTO_TURN_SETTLE_MS = 500;
+constexpr int AUTO_TURN_DEGREES = 90;
 constexpr uint32_t AUTO_ADVANCE_MS = 400;
 constexpr size_t MAX_UPLOADED_MELODY_NOTES = 256;
 constexpr uint16_t MIN_UPLOADED_NOTE_DURATION_MS = 20;
@@ -119,8 +118,6 @@ bool obstacleAlarmActive = false;
 uint32_t obstacleAlarmStartedMs = 0;
 uint32_t laserTurnedOnMs = 0;
 RouteState routeState = RouteState::Patrol;
-int routeTurnDirection = 0;
-bool nextFallbackTurnRight = true;
 uint32_t routeActionStartedMs = 0;
 uint32_t routeActionDurationMs = 0;
 size_t melodyIndex = 0;
@@ -338,20 +335,16 @@ void startTofTask(void *) {
   }
 }
 
-void beginFallbackTurn(uint32_t now) {
+void beginAutoRightTurn(uint32_t now) {
   stopDrive();
-  routeTurnDirection = nextFallbackTurnRight ? 1 : -1;
-  nextFallbackTurnRight = !nextFallbackTurnRight;
-  const int8_t turnDirection = routeTurnDirection;
-  leftMotor.setDirection(turnDirection);
-  rightMotor.setDirection(-turnDirection);
+  leftMotor.setDirection(1);
+  rightMotor.setDirection(-1);
   motorsEnabledByCommand = true;
   routeActionStartedMs = now;
   routeActionDurationMs =
-      Config::AUTO_FALLBACK_TURN_DEGREES * Config::AUTO_TURN_MS_PER_DEG;
+      Config::AUTO_TURN_DEGREES * Config::AUTO_TURN_MS_PER_DEG;
   routeState = RouteState::Turning;
-  Serial.printf("Obstacle persists; turning approximately 90 degrees %s\n",
-                routeTurnDirection > 0 ? "right" : "left");
+  Serial.println("Obstacle persists; turning approximately 90 degrees right");
 }
 
 void beginRouteAdvance(uint32_t now) {
@@ -392,7 +385,8 @@ void updateAutoDrive() {
 
   }
 
-  if (hardCollisionActive && routeState != RouteState::Turning) {
+  if (autonomousMode && hardCollisionActive &&
+      routeState != RouteState::Turning) {
     stopDrive();
   }
 
@@ -406,11 +400,9 @@ void updateAutoDrive() {
   switch (routeState) {
   case RouteState::Patrol:
     if (rangeFresh && range <= Config::REACTIVE_TRIGGER_RAW_MM) {
-      stopDrive();
       triggerObstacleAlarm();
-      routeState = RouteState::TurnSettling;
-      routeActionStartedMs = now;
-      Serial.printf("Obstacle at %u mm; preparing a fallback turn\n", range);
+      beginAutoRightTurn(now);
+      Serial.printf("Obstacle at %u mm; stopped and turning right\n", range);
       return;
     }
     if (!rangeFresh || hardCollisionActive) {
@@ -434,15 +426,10 @@ void updateAutoDrive() {
   case RouteState::TurnSettling:
     if (!rangeFresh ||
         static_cast<int32_t>(latestRangeMs - routeActionStartedMs) <= 0) {
-      if (static_cast<uint32_t>(now - routeActionStartedMs) >=
-          Config::AUTO_TURN_SETTLE_MS) {
-        routeState = RouteState::Patrol;
-        routeActionStartedMs = now;
-      }
       return;
     }
-    if (range <= Config::REACTIVE_TRIGGER_RAW_MM || hardCollisionActive) {
-      beginFallbackTurn(now);
+    if (range <= Config::REACTIVE_TRIGGER_RAW_MM) {
+      beginAutoRightTurn(now);
       return;
     }
     beginRouteAdvance(now);
@@ -450,10 +437,8 @@ void updateAutoDrive() {
 
   case RouteState::Advancing:
     if (rangeFresh && range <= Config::REACTIVE_TRIGGER_RAW_MM) {
-      stopDrive();
       triggerObstacleAlarm();
-      routeState = RouteState::TurnSettling;
-      routeActionStartedMs = now;
+      beginAutoRightTurn(now);
       return;
     }
     if (static_cast<uint32_t>(now - routeActionStartedMs) >=
@@ -608,12 +593,6 @@ void processCommand(const char *packet) {
       lastCommandMs = millis();
       return;
     }
-    if (hardCollisionActive) {
-      stopDrive();
-      lastCommandMs = millis();
-      return;
-    }
-
     const int leftMix = constrain(throttle + steering, -100, 100);
     const int rightMix = constrain(throttle - steering, -100, 100);
     const int8_t leftDirection =
@@ -661,11 +640,6 @@ void processCommand(const char *packet) {
   if (routeState == RouteState::Hold) {
     routeState = RouteState::Patrol;
   } else if (routeState != RouteState::Patrol) {
-    lastCommandMs = millis();
-    return;
-  }
-  if (hardCollisionActive) {
-    stopDrive();
     lastCommandMs = millis();
     return;
   }

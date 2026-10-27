@@ -75,6 +75,15 @@
       pointer-events: none;
     }
     .axis-value { min-height: 1.2em; margin-top: 7px; color: #c1bd8c; font-variant-numeric: tabular-nums; font-size: .82rem; }
+    .obstacle-status {
+      max-width: 420px; margin: 10px auto 0; padding: 10px 12px;
+      border: 1px solid #675b4e; border-radius: 12px;
+      background: #292621; color: #d0c6b7; font-weight: 700;
+    }
+    .obstacle-status.detected {
+      border-color: #c76a50; background: #542f29; color: #fff0e8;
+    }
+    .obstacle-status.clear { border-color: #64734b; color: #dce5bd; }
     .toggles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
     .toggle { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 10px 5px; }
     .toggle.active { border-color: #a7ad78; color: #e4ddb0; background: #424331; }
@@ -132,6 +141,9 @@
           </div>
           <div class="axis-value" id="driveValue">Throttle 0 · Steer 0</div>
           <div class="subtle">Drive</div>
+          <div class="obstacle-status" id="obstacleStatus" role="status" aria-live="assertive">
+            Waiting for distance data
+          </div>
         </div>
       </div>
       <p class="notice">Motor enable jumpers mean fixed-speed drive: the stick controls direction and steering, not speed. RC stays under joystick control at the 400 mm Auto trigger distance; Auto stops and alternates approximate 90° turns when the forward-facing sensor detects an obstacle, then rechecks. A separate close-range hard stop still applies at about 150 mm from the robot tip. Turns are timed estimates and must be tested safely.</p>
@@ -172,6 +184,7 @@
       const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
       const RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
       const TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+      const OBSTACLE_TRIGGER_RAW_MM = 585;
       const encoder = new TextEncoder();
       const $ = (id) => document.getElementById(id);
       const state = {
@@ -205,6 +218,7 @@
           state.server = null;
           state.device = null;
           state.mode = "RC";
+          state.haveTelemetry = false;
           state.laser = false;
           state.music = false;
           state.driveActive = false;
@@ -214,6 +228,7 @@
           updateToggle("musicToggle", false);
           releaseDrive();
         }
+        updateObstacleStatus("NA", state.tofAvailable);
       }
 
       function updateMode() {
@@ -227,6 +242,38 @@
         button.classList.toggle("active", active);
         button.setAttribute("aria-pressed", String(active));
         button.querySelector(".state").textContent = active ? "On" : "Off";
+      }
+
+      function updateObstacleStatus(distanceText, sensorAvailable) {
+        const status = $("obstacleStatus");
+        status.classList.remove("detected", "clear");
+        if (!state.server?.connected) {
+          status.textContent = "Connect to see obstacle status";
+          return;
+        }
+        if (!state.haveTelemetry) {
+          status.textContent = "Waiting for distance data";
+          return;
+        }
+        if (!sensorAvailable || distanceText === "NA") {
+          status.textContent = sensorAvailable
+            ? "Distance unavailable. Status unknown."
+            : "Distance sensor unavailable. Status unknown.";
+          return;
+        }
+
+        const distanceMm = Number(distanceText);
+        if (!Number.isFinite(distanceMm)) {
+          status.textContent = "Invalid distance reading — obstacle status unknown";
+          return;
+        }
+        if (distanceMm <= OBSTACLE_TRIGGER_RAW_MM) {
+          status.classList.add("detected");
+          status.textContent = `OBSTACLE! (Distance: ${distanceMm} mm)`;
+        } else {
+          status.classList.add("clear");
+          status.textContent = `CLEAR! (Distance: ${distanceMm} mm)`;
+        }
       }
 
       function sendCommand(command, requireResponse = false) {
@@ -567,6 +614,7 @@
         $("distanceValue").textContent = match[1] === "NA" ? "No reading" : `${match[1]} mm`;
         $("tofValue").textContent = state.tofAvailable ? "Available" : "Unavailable";
         $("telemetryAge").textContent = "Live";
+        updateObstacleStatus(match[1], state.tofAvailable);
         $("autoMode").disabled = !state.server?.connected || !state.tofAvailable;
       }
 
@@ -778,6 +826,7 @@
         }
         if (state.haveTelemetry && Date.now() - state.lastTelemetryAt > 1500) {
           $("telemetryAge").textContent = "Signal stale";
+          updateObstacleStatus("NA", state.tofAvailable);
         }
       }, 120);
     })();
