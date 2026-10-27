@@ -44,7 +44,7 @@
     .subtle { color: #b7aa96; font-size: .78rem; }
     .mode-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .mode-button.active { background: #a7ad78; color: #22231b; border-color: #a7ad78; font-weight: 750; }
-    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .controls { display: grid; grid-template-columns: 1fr; gap: 14px; }
     .stick-wrap { text-align: center; min-width: 0; }
     .stick {
       position: relative;
@@ -133,26 +133,17 @@
           <div class="axis-value" id="driveValue">Throttle 0 · Steer 0</div>
           <div class="subtle">Drive</div>
         </div>
-        <div class="stick-wrap">
-          <div class="stick" id="turretStick" role="application" aria-label="Turret joystick">
-            <div class="knob"></div>
-          </div>
-          <div class="axis-value" id="turretValue">Pan 0</div>
-          <div class="subtle">Turret pan</div>
-        </div>
       </div>
-      <p class="notice">Motor enable jumpers mean fixed-speed drive: the stick controls direction and steering, not speed. Auto drives forward, then scans the 0–180° field in 15° steps when an obstacle is within the configured 750 mm clearance threshold. Turn timing is open-loop and must be calibrated for the chassis.</p>
+      <p class="notice">Motor enable jumpers mean fixed-speed drive: the stick controls direction and steering, not speed. RC stays under joystick control at the 400 mm Auto trigger distance; Auto stops and alternates approximate 90° turns when the forward-facing sensor detects an obstacle, then rechecks. A separate close-range hard stop still applies at about 150 mm from the robot tip. Turns are timed estimates and must be tested safely.</p>
     </section>
 
     <section class="card">
       <h2 class="section-title">Robot features <span class="subtle">Tap to toggle</span></h2>
       <div class="toggles">
-        <button class="toggle" id="panToggle" aria-pressed="false"><span>RC obstacle pan</span><span class="state">Off</span></button>
-        <button class="toggle" id="turretPilotToggle" aria-pressed="false" disabled><span>Auto turret pilot</span><span class="state">Off</span></button>
         <button class="toggle" id="laserToggle" aria-pressed="false"><span>Laser</span><span class="state">Off</span></button>
         <button class="toggle" id="musicToggle" aria-pressed="false"><span>Music</span><span class="state">Off</span></button>
       </div>
-      <p class="notice">Auto turret pilot pauses driving so you can aim the turret; turn it off to resume automatic obstacle scanning. The laser automatically shuts off after 5 seconds and on disconnect. RC obstacle pan requires the RC pan toggle and a working ToF sensor.</p>
+      <p class="notice">RC mode does not automatically scan or steer around obstacles. The laser automatically shuts off after 5 seconds and on disconnect.</p>
     </section>
 
     <section class="card">
@@ -186,8 +177,8 @@
       const state = {
         device: null, server: null, rx: null, tx: null,
         mode: "RC", tofAvailable: false, haveTelemetry: false,
-        driveActive: false, driveX: 0, driveY: 0, turretX: 0, turretActive: false,
-        pan: false, turretPilot: false, laser: false, music: false,
+        driveActive: false, driveX: 0, driveY: 0,
+        laser: false, music: false,
         writeChain: Promise.resolve(), lastTelemetryAt: 0, laserTimer: 0,
         midiTracks: [], midiNotes: [], midiFileName: "", uploadAckResolver: null
       };
@@ -206,7 +197,6 @@
         });
         $("stopButton").disabled = !connected;
         $("autoMode").disabled = !connected || !state.tofAvailable;
-        $("turretPilotToggle").disabled = !connected || state.mode !== "AUTO";
         $("uploadMidiButton").disabled =
             !connected || state.midiNotes.length === 0;
         if (!connected) {
@@ -215,16 +205,11 @@
           state.server = null;
           state.device = null;
           state.mode = "RC";
-          state.pan = false;
-          state.turretPilot = false;
           state.laser = false;
           state.music = false;
           state.driveActive = false;
-          state.turretActive = false;
           clearTimeout(state.laserTimer);
           updateMode();
-          updateToggle("panToggle", false);
-          updateToggle("turretPilotToggle", false);
           updateToggle("laserToggle", false);
           updateToggle("musicToggle", false);
           releaseDrive();
@@ -235,8 +220,6 @@
         $("rcMode").classList.toggle("active", state.mode === "RC");
         $("autoMode").classList.toggle("active", state.mode === "AUTO");
         $("modeStatus").textContent = `${state.mode} selected`;
-        $("turretPilotToggle").disabled =
-            !state.server?.connected || state.mode !== "AUTO";
       }
 
       function updateToggle(id, active) {
@@ -589,7 +572,7 @@
 
       async function disconnect() {
         if (state.rx && state.server?.connected) {
-          for (const command of ["J,0,0", "L,0", "M,0", "P,0", "TP,0"]) {
+          for (const command of ["J,0,0", "L,0", "M,0"]) {
             try { await sendCommand(command); } catch { break; }
           }
         }
@@ -623,18 +606,12 @@
           state.tx.addEventListener("characteristicvaluechanged", handleTelemetry);
           setConnected(true);
           state.mode = "RC";
-          state.pan = false;
-          state.turretPilot = false;
           state.laser = false;
           state.music = false;
           updateMode();
-          updateToggle("panToggle", false);
-          updateToggle("turretPilotToggle", false);
           updateToggle("laserToggle", false);
           updateToggle("musicToggle", false);
           await sendCommand("MODE,RC");
-          await sendCommand("TP,0");
-          await sendCommand("P,0");
           await sendCommand("L,0");
           await sendCommand("M,0");
           showError("");
@@ -665,7 +642,7 @@
         $("driveValue").textContent = `Throttle ${state.driveY} · Steer ${state.driveX}`;
       }
 
-      function setupStick(element, onMove, onRelease, horizontalOnly = false) {
+      function setupStick(element, onMove, onRelease) {
         const knob = element.querySelector(".knob");
         let pointer = null;
         function update(event) {
@@ -674,7 +651,7 @@
           const cy = bounds.top + bounds.height / 2;
           const limit = bounds.width * 0.34;
           let dx = event.clientX - cx;
-          let dy = horizontalOnly ? 0 : event.clientY - cy;
+          let dy = event.clientY - cy;
           const length = Math.hypot(dx, dy);
           if (length > limit) {
             dx = dx / length * limit;
@@ -699,7 +676,7 @@
           if (event.pointerId !== pointer) return;
           pointer = null;
           knob.style.left = "50%";
-          if (!horizontalOnly) knob.style.top = "50%";
+          knob.style.top = "50%";
           onRelease();
         };
         element.addEventListener("pointerup", end);
@@ -708,16 +685,6 @@
       }
 
       setupStick($("driveStick"), setDriveFromStick, releaseDrive);
-      setupStick($("turretStick"), (x) => {
-        state.turretX = Math.round(x * 100);
-        state.turretActive = true;
-        $("turretValue").textContent = `Pan ${state.turretX}`;
-      }, () => {
-        state.turretX = 0;
-        state.turretActive = false;
-        $("turretValue").textContent = "Pan 0";
-        if (state.mode === "RC" || state.turretPilot) trySend("T,0");
-      }, true);
 
       $("midiFile").addEventListener("change", async (event) => {
         const file = event.target.files?.[0];
@@ -753,12 +720,10 @@
         try {
           await sendCommand("S");
           state.mode = "RC";
-          state.turretPilot = false;
           state.laser = false;
           state.driveActive = false;
           clearTimeout(state.laserTimer);
           updateMode();
-          updateToggle("turretPilotToggle", false);
           updateToggle("laserToggle", false);
           releaseDrive();
         } catch (error) { showError(error.message); }
@@ -767,12 +732,8 @@
         try {
           releaseDrive();
           await sendCommand("J,0,0");
-          await sendCommand("TP,0");
           await sendCommand("MODE,RC");
           state.mode = "RC";
-          state.turretPilot = false;
-          state.turretActive = false;
-          updateToggle("turretPilotToggle", false);
           updateMode();
         } catch (error) { showError(error.message); }
       });
@@ -781,38 +742,12 @@
         try {
           releaseDrive();
           await sendCommand("J,0,0");
-          await sendCommand("TP,0");
           await sendCommand("MODE,AUTO");
           state.mode = "AUTO";
-          state.turretPilot = false;
-          state.turretActive = false;
-          updateToggle("turretPilotToggle", false);
           updateMode();
         } catch (error) { showError(error.message); }
       });
 
-      $("panToggle").addEventListener("click", async () => {
-        const next = !state.pan;
-        try {
-          await sendCommand(`P,${next ? 1 : 0}`);
-          state.pan = next;
-          updateToggle("panToggle", next);
-        } catch (error) { showError(error.message); }
-      });
-      $("turretPilotToggle").addEventListener("click", async () => {
-        if (state.mode !== "AUTO") return;
-        const next = !state.turretPilot;
-        try {
-          await sendCommand(`TP,${next ? 1 : 0}`);
-          state.turretPilot = next;
-          updateToggle("turretPilotToggle", next);
-          if (!next) {
-            state.turretX = 0;
-            state.turretActive = false;
-            $("turretValue").textContent = "Pan 0";
-          }
-        } catch (error) { showError(error.message); }
-      });
       $("laserToggle").addEventListener("click", async () => {
         const next = !state.laser;
         try {
@@ -840,10 +775,6 @@
       setInterval(() => {
         if (state.driveActive && state.mode === "RC" && state.server?.connected) {
           trySend(`J,${state.driveY},${state.driveX}`);
-        }
-        if (state.turretActive && state.server?.connected &&
-            (state.mode === "RC" || (state.mode === "AUTO" && state.turretPilot))) {
-          trySend(`T,${state.turretX}`);
         }
         if (state.haveTelemetry && Date.now() - state.lastTelemetryAt > 1500) {
           $("telemetryAge").textContent = "Signal stale";

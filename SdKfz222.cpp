@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <ESP32Servo.h>
 #include <NimBLEDevice.h>
 #include <VL53L1X.h>
 #include <esp_arduino_version.h>
@@ -14,7 +13,6 @@ constexpr uint8_t LEFT_IN1 = 26;
 constexpr uint8_t LEFT_IN2 = 27;
 constexpr uint8_t RIGHT_IN1 = 16;
 constexpr uint8_t RIGHT_IN2 = 17;
-constexpr uint8_t TURRET_SERVO_PIN = 18;
 constexpr uint8_t LASER_PIN = 23;
 constexpr uint8_t BUZZER_PIN = 19;
 constexpr uint8_t I2C_SDA = 21;
@@ -25,42 +23,29 @@ constexpr uint8_t MOTOR_DEADBAND = 8;
 constexpr uint32_t COMMAND_TIMEOUT_MS = 500;
 constexpr uint32_t TELEMETRY_INTERVAL_MS = 250;
 constexpr uint32_t LASER_MAX_ON_MS = 5000;
-constexpr int TURRET_MIN_ANGLE = 0;
-constexpr int TURRET_MAX_ANGLE = 180;
 constexpr uint16_t SENSOR_TO_TIP_OFFSET_MM = 185;
-constexpr uint16_t FAR_ZONE_CLEARANCE_MM = 1030;
-constexpr uint16_t REACTIVE_TRIGGER_CLEARANCE_MM = 750;
+constexpr uint16_t REACTIVE_TRIGGER_CLEARANCE_MM = 400;
 constexpr uint16_t HARD_COLLISION_CLEARANCE_MM = 150;
 constexpr uint16_t HARD_COLLISION_RELEASE_CLEARANCE_MM = 190;
-constexpr uint16_t FAR_ZONE_RAW_MM = SENSOR_TO_TIP_OFFSET_MM + FAR_ZONE_CLEARANCE_MM;
 constexpr uint16_t REACTIVE_TRIGGER_RAW_MM =
   SENSOR_TO_TIP_OFFSET_MM + REACTIVE_TRIGGER_CLEARANCE_MM;
 constexpr uint16_t HARD_COLLISION_RAW_MM =
   SENSOR_TO_TIP_OFFSET_MM + HARD_COLLISION_CLEARANCE_MM;
 constexpr uint16_t HARD_COLLISION_RELEASE_RAW_MM =
   SENSOR_TO_TIP_OFFSET_MM + HARD_COLLISION_RELEASE_CLEARANCE_MM;
-constexpr uint32_t ROUTE_SCAN_SETTLE_MS = 250;
-constexpr uint32_t ROUTE_SCAN_SAMPLE_TIMEOUT_MS = 750;
-constexpr uint8_t ROUTE_SCAN_SAMPLE_COUNT = 3;
 constexpr uint32_t TOF_FRESHNESS_MS = 200;
-constexpr uint16_t ROUTE_MIN_CLEARANCE_RAW_MM = REACTIVE_TRIGGER_RAW_MM;
 constexpr uint16_t OBSTACLE_ALARM_FREQUENCY_HZ = 2200;
 constexpr uint32_t OBSTACLE_ALARM_DURATION_MS = 350;
 constexpr uint32_t AUTO_TURN_MS_PER_DEG = 7;
+constexpr int AUTO_FALLBACK_TURN_DEGREES = 90;
+constexpr uint32_t AUTO_TURN_SETTLE_MS = 500;
 constexpr uint32_t AUTO_ADVANCE_MS = 400;
-constexpr uint32_t ROUTE_RETRY_INTERVAL_MS = 1000;
 constexpr size_t MAX_UPLOADED_MELODY_NOTES = 256;
 constexpr uint16_t MIN_UPLOADED_NOTE_DURATION_MS = 20;
 constexpr uint16_t MAX_UPLOADED_NOTE_DURATION_MS = 5000;
 constexpr uint16_t MAX_UPLOADED_NOTE_FREQUENCY_HZ = 4000;
 constexpr char BLE_NAME[] = "SdKfz222";
 }
-
-constexpr int ROUTE_SCAN_ANGLES[] = {
-    90, 75, 60, 45, 30, 15, 0, 15, 30, 45,
-    60, 75, 90, 105, 120, 135, 150, 165, 180};
-constexpr size_t ROUTE_SCAN_ANGLE_COUNT =
-    sizeof(ROUTE_SCAN_ANGLES) / sizeof(ROUTE_SCAN_ANGLES[0]);
 
 constexpr char BLE_SERVICE_UUID[] = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
 constexpr char BLE_RX_UUID[] = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
@@ -74,14 +59,9 @@ struct Command {
 
 enum class RouteState : uint8_t {
   Patrol,
-  Scanning,
-  RouteReady,
-  Centering,
   Turning,
   TurnSettling,
   Advancing,
-  WaitingForClear,
-  NoRoute,
   Hold
 };
 
@@ -118,7 +98,6 @@ private:
 
 Motor leftMotor(Config::LEFT_IN1, Config::LEFT_IN2);
 Motor rightMotor(Config::RIGHT_IN1, Config::RIGHT_IN2);
-Servo turretServo;
 VL53L1X tof;
 NimBLECharacteristic *txCharacteristic = nullptr;
 QueueHandle_t commandQueue = nullptr;
@@ -134,23 +113,14 @@ uint32_t lastSerialRangeMs = 0;
 bool motorsEnabledByCommand = false;
 bool melodyPlaying = false;
 bool melodyResting = false;
-volatile bool obstaclePanEnabled = false;
-bool turretPilotEnabled = false;
 bool hardCollisionActive = false;
 bool laserEnabled = false;
 bool obstacleAlarmActive = false;
 uint32_t obstacleAlarmStartedMs = 0;
 uint32_t laserTurnedOnMs = 0;
 RouteState routeState = RouteState::Patrol;
-int turretPanAngle = 90;
-uint32_t lastTurretPanStepMs = 0;
-size_t routeScanAngleIndex = 0;
-uint8_t routeScanValidSamples = 0;
-uint32_t routeScanRangeSum = 0;
-uint32_t lastRouteSampleMs = 0;
-int bestRouteAngle = 90;
-uint16_t bestRouteRangeMm = 0;
 int routeTurnDirection = 0;
+bool nextFallbackTurnRight = true;
 uint32_t routeActionStartedMs = 0;
 uint32_t routeActionDurationMs = 0;
 size_t melodyIndex = 0;
@@ -170,7 +140,6 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
 
   void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override {
     bleConnected = false;
-    obstaclePanEnabled = false;
     NimBLEDevice::getAdvertising()->start();
   }
 };
@@ -369,31 +338,23 @@ void startTofTask(void *) {
   }
 }
 
-void beginRouteScan(uint32_t now) {
+void beginFallbackTurn(uint32_t now) {
   stopDrive();
-  triggerObstacleAlarm();
-  routeState = RouteState::Scanning;
-  routeScanAngleIndex = 0;
-  routeScanValidSamples = 0;
-  routeScanRangeSum = 0;
-  bestRouteRangeMm = 0;
-  bestRouteAngle = 90;
-  turretPanAngle = ROUTE_SCAN_ANGLES[routeScanAngleIndex];
-  turretServo.write(turretPanAngle);
-  lastTurretPanStepMs = now;
-  lastRouteSampleMs = latestRangeMs;
-  Serial.printf("Obstacle scan started at %d degrees\n", turretPanAngle);
+  routeTurnDirection = nextFallbackTurnRight ? 1 : -1;
+  nextFallbackTurnRight = !nextFallbackTurnRight;
+  const int8_t turnDirection = routeTurnDirection;
+  leftMotor.setDirection(turnDirection);
+  rightMotor.setDirection(-turnDirection);
+  motorsEnabledByCommand = true;
+  routeActionStartedMs = now;
+  routeActionDurationMs =
+      Config::AUTO_FALLBACK_TURN_DEGREES * Config::AUTO_TURN_MS_PER_DEG;
+  routeState = RouteState::Turning;
+  Serial.printf("Obstacle persists; turning approximately 90 degrees %s\n",
+                routeTurnDirection > 0 ? "right" : "left");
 }
 
 void beginRouteAdvance(uint32_t now) {
-  if (!autonomousMode &&
-      (!bleConnected || static_cast<uint32_t>(now - lastCommandMs) >
-                            Config::COMMAND_TIMEOUT_MS)) {
-    stopDrive();
-    routeState = RouteState::RouteReady;
-    return;
-  }
-
   leftMotor.setDirection(1);
   rightMotor.setDirection(1);
   motorsEnabledByCommand = true;
@@ -401,35 +362,9 @@ void beginRouteAdvance(uint32_t now) {
   routeActionStartedMs = now;
 }
 
-void beginRouteTurn(uint32_t now) {
-  if (bestRouteRangeMm <= Config::ROUTE_MIN_CLEARANCE_RAW_MM) {
-    stopDrive();
-    routeState = RouteState::NoRoute;
-    routeActionStartedMs = now;
-    return;
-  }
-
-  if (!autonomousMode &&
-      (!bleConnected || static_cast<uint32_t>(now - lastCommandMs) >
-                            Config::COMMAND_TIMEOUT_MS)) {
-    stopDrive();
-    routeState = RouteState::WaitingForClear;
-    routeActionStartedMs = now;
-    return;
-  }
-
-  turretPanAngle = 90;
-  turretServo.write(turretPanAngle);
-  lastTurretPanStepMs = now;
-  routeTurnDirection = bestRouteAngle > 90 ? 1 : (bestRouteAngle < 90 ? -1 : 0);
-  routeActionStartedMs = now;
-  routeState = RouteState::Centering;
-}
-
-void updateTurretPan() {
+void updateAutoDrive() {
   const uint32_t now = millis();
-  if ((!autonomousMode && (!obstaclePanEnabled || !bleConnected)) ||
-      turretPilotEnabled) {
+  if (!autonomousMode) {
     if (routeState != RouteState::Patrol && routeState != RouteState::Hold) {
       stopDrive();
       routeState = RouteState::Patrol;
@@ -461,118 +396,33 @@ void updateTurretPan() {
     stopDrive();
   }
 
-  if (autonomousMode && turretPilotEnabled) {
-    stopDrive();
-    return;
-  }
-
-  const bool scanAllowed =
-      autonomousMode || (obstaclePanEnabled && bleConnected);
-  if (hardCollisionActive && scanAllowed &&
-      (routeState == RouteState::Advancing ||
-       routeState == RouteState::RouteReady)) {
-    beginRouteScan(now);
+  if (!autonomousMode) {
+    if (routeState != RouteState::Hold) {
+      routeState = RouteState::Patrol;
+    }
     return;
   }
 
   switch (routeState) {
   case RouteState::Patrol:
-    if (rangeFresh && range <= Config::REACTIVE_TRIGGER_RAW_MM && scanAllowed) {
-      beginRouteScan(now);
-      return;
-    }
-    if (autonomousMode) {
-      if (!rangeFresh || hardCollisionActive) {
-        stopDrive();
-      } else {
-        leftMotor.setDirection(1);
-        rightMotor.setDirection(1);
-        motorsEnabledByCommand = true;
-      }
-    }
-    return;
-
-  case RouteState::Scanning:
-    stopDrive();
-    if (static_cast<uint32_t>(now - lastTurretPanStepMs) <
-        Config::ROUTE_SCAN_SETTLE_MS) {
-      return;
-    }
-    if (rangeFresh && latestRangeMs != lastRouteSampleMs) {
-      lastRouteSampleMs = latestRangeMs;
-      routeScanRangeSum += range;
-      ++routeScanValidSamples;
-    }
-    if (routeScanValidSamples < Config::ROUTE_SCAN_SAMPLE_COUNT &&
-        static_cast<uint32_t>(now - lastTurretPanStepMs) <
-            Config::ROUTE_SCAN_SETTLE_MS +
-                Config::ROUTE_SCAN_SAMPLE_TIMEOUT_MS) {
-      return;
-    }
-    if (routeScanValidSamples != 0) {
-      const uint16_t averageRange = static_cast<uint16_t>(
-          routeScanRangeSum / routeScanValidSamples);
-      if (averageRange > bestRouteRangeMm) {
-        bestRouteRangeMm = averageRange;
-        bestRouteAngle = turretPanAngle;
-      }
-    }
-    ++routeScanAngleIndex;
-    if (routeScanAngleIndex >= ROUTE_SCAN_ANGLE_COUNT) {
-      Serial.printf("Obstacle scan complete: best=%d degrees, range=%u mm\n",
-                    bestRouteAngle, bestRouteRangeMm);
-      routeState = RouteState::RouteReady;
-      return;
-    }
-    turretPanAngle = ROUTE_SCAN_ANGLES[routeScanAngleIndex];
-    turretServo.write(turretPanAngle);
-    lastTurretPanStepMs = now;
-    routeScanValidSamples = 0;
-    routeScanRangeSum = 0;
-    lastRouteSampleMs = latestRangeMs;
-    return;
-
-  case RouteState::RouteReady:
-    beginRouteTurn(now);
-    return;
-
-  case RouteState::Centering:
-    if (static_cast<uint32_t>(now - routeActionStartedMs) <
-        Config::ROUTE_SCAN_SETTLE_MS) {
-      return;
-    }
-    if (routeTurnDirection == 0) {
+    if (rangeFresh && range <= Config::REACTIVE_TRIGGER_RAW_MM) {
+      stopDrive();
+      triggerObstacleAlarm();
       routeState = RouteState::TurnSettling;
       routeActionStartedMs = now;
+      Serial.printf("Obstacle at %u mm; preparing a fallback turn\n", range);
       return;
     }
-    if (!autonomousMode &&
-        (!bleConnected || static_cast<uint32_t>(now - lastCommandMs) >
-                              Config::COMMAND_TIMEOUT_MS)) {
+    if (!rangeFresh || hardCollisionActive) {
       stopDrive();
-      routeState = RouteState::WaitingForClear;
-      routeActionStartedMs = now;
-      return;
-    }
-    {
-      const int8_t turnDirection = routeTurnDirection > 0 ? 1 : -1;
-      leftMotor.setDirection(turnDirection);
-      rightMotor.setDirection(-turnDirection);
+    } else {
+      leftMotor.setDirection(1);
+      rightMotor.setDirection(1);
       motorsEnabledByCommand = true;
-      routeActionDurationMs =
-          static_cast<uint32_t>(abs(bestRouteAngle - 90)) *
-          Config::AUTO_TURN_MS_PER_DEG;
-      routeActionStartedMs = now;
-      routeState = RouteState::Turning;
     }
     return;
 
   case RouteState::Turning:
-    if (!bleConnected && !autonomousMode) {
-      stopDrive();
-      routeState = RouteState::Hold;
-      return;
-    }
     if (static_cast<uint32_t>(now - routeActionStartedMs) >=
         routeActionDurationMs) {
       stopDrive();
@@ -584,55 +434,32 @@ void updateTurretPan() {
   case RouteState::TurnSettling:
     if (!rangeFresh ||
         static_cast<int32_t>(latestRangeMs - routeActionStartedMs) <= 0) {
-      if (static_cast<uint32_t>(now - routeActionStartedMs) >= 500) {
-        routeState = RouteState::NoRoute;
+      if (static_cast<uint32_t>(now - routeActionStartedMs) >=
+          Config::AUTO_TURN_SETTLE_MS) {
+        routeState = RouteState::Patrol;
         routeActionStartedMs = now;
       }
       return;
     }
     if (range <= Config::REACTIVE_TRIGGER_RAW_MM || hardCollisionActive) {
-      beginRouteScan(now);
+      beginFallbackTurn(now);
       return;
     }
     beginRouteAdvance(now);
     return;
 
   case RouteState::Advancing:
-    if (!bleConnected && !autonomousMode) {
-      stopDrive();
-      routeState = RouteState::Hold;
-      return;
-    }
     if (rangeFresh && range <= Config::REACTIVE_TRIGGER_RAW_MM) {
-      beginRouteScan(now);
+      stopDrive();
+      triggerObstacleAlarm();
+      routeState = RouteState::TurnSettling;
+      routeActionStartedMs = now;
       return;
     }
     if (static_cast<uint32_t>(now - routeActionStartedMs) >=
         Config::AUTO_ADVANCE_MS) {
       stopDrive();
       routeState = RouteState::Patrol;
-    }
-    return;
-
-  case RouteState::WaitingForClear:
-    if (rangeFresh && range > Config::FAR_ZONE_RAW_MM) {
-      routeState = RouteState::Patrol;
-      return;
-    }
-    if (static_cast<uint32_t>(now - routeActionStartedMs) >=
-        Config::ROUTE_RETRY_INTERVAL_MS) {
-      beginRouteScan(now);
-    }
-    return;
-
-  case RouteState::NoRoute:
-    if (rangeFresh && range > Config::FAR_ZONE_RAW_MM) {
-      routeState = RouteState::Patrol;
-      return;
-    }
-    if (static_cast<uint32_t>(now - routeActionStartedMs) >=
-        Config::ROUTE_RETRY_INTERVAL_MS) {
-      beginRouteScan(now);
     }
     return;
 
@@ -645,7 +472,6 @@ void updateTurretPan() {
 void processCommand(const char *packet) {
   if (strcmp(packet, "S") == 0) {
     autonomousMode = false;
-    turretPilotEnabled = false;
     stopDrive();
     setLaser(false);
     routeState = RouteState::Hold;
@@ -658,7 +484,6 @@ void processCommand(const char *packet) {
 
   if (strcmp(packet, "MODE,RC") == 0) {
     autonomousMode = false;
-    turretPilotEnabled = false;
     stopDrive();
     routeState = RouteState::Patrol;
     lastCommandMs = millis();
@@ -671,33 +496,10 @@ void processCommand(const char *packet) {
       return;
     }
     autonomousMode = true;
-    turretPilotEnabled = false;
     stopDrive();
-    turretPanAngle = 90;
-    turretServo.write(turretPanAngle);
     routeState = RouteState::Patrol;
     lastCommandMs = millis();
     Serial.println("Auto mode enabled");
-    return;
-  }
-
-  consumed = 0;
-  if (sscanf(packet, "TP,%d%n", &value, &consumed) == 1 &&
-      packet[consumed] == '\0' && (value == 0 || value == 1)) {
-    if (!autonomousMode) {
-      Serial.println("Turret pilot command ignored outside Auto mode");
-      return;
-    }
-    turretPilotEnabled = value == 1;
-    stopDrive();
-    routeState = RouteState::Patrol;
-    if (!turretPilotEnabled) {
-      turretPanAngle = 90;
-      turretServo.write(turretPanAngle);
-    }
-    lastCommandMs = millis();
-    Serial.println(turretPilotEnabled ? "Turret pilot enabled"
-                                      : "Automatic turret scan resumed");
     return;
   }
 
@@ -708,32 +510,10 @@ void processCommand(const char *packet) {
       return;
     }
     autonomousMode = value == 1;
-    turretPilotEnabled = false;
     stopDrive();
     routeState = RouteState::Patrol;
-    if (autonomousMode) {
-      turretPanAngle = 90;
-      turretServo.write(turretPanAngle);
-    }
     lastCommandMs = millis();
     Serial.println(autonomousMode ? "Autonomous mode enabled" : "Manual mode enabled");
-    return;
-  }
-
-  consumed = 0;
-  if (sscanf(packet, "P,%d%n", &value, &consumed) == 1 &&
-      packet[consumed] == '\0' && (value == 0 || value == 1)) {
-    obstaclePanEnabled = value == 1;
-    if (!obstaclePanEnabled && !autonomousMode &&
-        routeState != RouteState::Patrol &&
-        routeState != RouteState::Hold) {
-      stopDrive();
-      routeState = RouteState::Patrol;
-    }
-    lastCommandMs = millis();
-    Serial.println(obstaclePanEnabled
-                       ? "Obstacle-triggered turret pan enabled"
-                       : "Obstacle-triggered turret pan disabled");
     return;
   }
 
@@ -847,22 +627,6 @@ void processCommand(const char *packet) {
     return;
   }
 
-  int turretPan = 0;
-  consumed = 0;
-  if (sscanf(packet, "T,%d%n", &turretPan, &consumed) == 1 &&
-      packet[consumed] == '\0' && turretPan >= -100 && turretPan <= 100) {
-    if ((!autonomousMode || turretPilotEnabled) &&
-        (routeState == RouteState::Patrol || routeState == RouteState::Hold)) {
-      const int angle = map(turretPan, -100, 100, Config::TURRET_MIN_ANGLE,
-                            Config::TURRET_MAX_ANGLE);
-      turretServo.write(angle);
-      turretPanAngle = angle;
-      lastTurretPanStepMs = millis();
-    }
-    lastCommandMs = millis();
-    return;
-  }
-
   if (sscanf(packet, "L,%d%n", &value, &consumed) == 1 && packet[consumed] == '\0' &&
       (value == 0 || value == 1)) {
     setLaser(value == 1);
@@ -883,11 +647,10 @@ void processCommand(const char *packet) {
 
   int left = 0;
   int right = 0;
-  int turretAngle = 90;
   consumed = 0;
-  if (sscanf(packet, "D,%d,%d,%d%n", &left, &right, &turretAngle, &consumed) != 3 ||
-      packet[consumed] != '\0' || left < -255 || left > 255 || right < -255 || right > 255 ||
-      turretAngle < Config::TURRET_MIN_ANGLE || turretAngle > Config::TURRET_MAX_ANGLE) {
+  if (sscanf(packet, "D,%d,%d%n", &left, &right, &consumed) != 2 ||
+      packet[consumed] != '\0' || left < -255 || left > 255 ||
+      right < -255 || right > 255) {
     return;
   }
   if (autonomousMode) {
@@ -912,9 +675,6 @@ void processCommand(const char *packet) {
       abs(right) <= Config::MOTOR_DEADBAND ? 0 : (right > 0 ? 1 : -1);
   leftMotor.setDirection(leftDirection);
   rightMotor.setDirection(rightDirection);
-  turretServo.write(turretAngle);
-  turretPanAngle = turretAngle;
-  lastTurretPanStepMs = millis();
   motorsEnabledByCommand = (abs(left) > Config::MOTOR_DEADBAND ||
                             abs(right) > Config::MOTOR_DEADBAND);
   lastCommandMs = millis();
@@ -933,14 +693,9 @@ void receiveCommands() {
 void enforceCommandTimeout() {
   if (!bleConnected) {
     autonomousMode = false;
-    turretPilotEnabled = false;
     stopDrive();
     setLaser(false);
-    if (routeState != RouteState::Patrol && routeState != RouteState::Scanning &&
-        routeState != RouteState::RouteReady &&
-        routeState != RouteState::WaitingForClear && routeState != RouteState::NoRoute) {
-      routeState = RouteState::Hold;
-    }
+    routeState = RouteState::Hold;
     return;
   }
   const uint32_t now = millis();
@@ -1034,15 +789,6 @@ void setup() {
   rightMotor.begin();
   stopDrive();
 
-  turretServo.setPeriodHertz(50);
-  const int servoChannel =
-      turretServo.attach(Config::TURRET_SERVO_PIN, 500, 2500);
-  Serial.printf("SG90 attach: %s (channel %d)\n",
-                turretServo.attached() ? "OK" : "FAILED", servoChannel);
-  turretPanAngle = 90;
-  turretServo.write(turretPanAngle);
-  lastTurretPanStepMs = millis();
-
   commandQueue = xQueueCreate(8, sizeof(Command));
   beginBle();
 
@@ -1062,7 +808,7 @@ void setup() {
 
 void loop() {
   receiveCommands();
-  updateTurretPan();
+  updateAutoDrive();
   enforceCommandTimeout();
   updateObstacleAlarm();
   updateMelody();
