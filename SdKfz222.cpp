@@ -322,15 +322,15 @@ void updateMelody() {
 
 void startTofTask(void *) {
   TickType_t lastWake = xTaskGetTickCount();
-  const TickType_t pollPeriod = pdMS_TO_TICKS(50);
+  const TickType_t pollPeriod = pdMS_TO_TICKS(10);
   for (;;) {
-    const uint16_t range = tof.read();
-    if (tof.timeoutOccurred()) {
-      latestRangeMm = 0xFFFF;
-    } else {
-      latestRangeMm = range;
+    if (tof.dataReady()) {
+      const uint16_t range = tof.read(false);
+      if (!tof.timeoutOccurred()) {
+        latestRangeMm = range;
+        latestRangeMs = millis();
+      }
     }
-    latestRangeMs = millis();
     vTaskDelayUntil(&lastWake, pollPeriod);
   }
 }
@@ -699,7 +699,10 @@ void sendTelemetry() {
 
   char message[64];
   const uint16_t range = latestRangeMm;
-  if (range == 0xFFFF) {
+  const bool rangeFresh =
+      range != 0xFFFF &&
+      static_cast<uint32_t>(now - latestRangeMs) <= Config::TOF_FRESHNESS_MS;
+  if (!rangeFresh) {
     snprintf(message, sizeof(message), "T,%lu,NA,%d", static_cast<unsigned long>(now),
              tofAvailable ? 1 : 0);
   } else {
@@ -722,7 +725,10 @@ void printTofStatus() {
   }
 
   const uint16_t range = latestRangeMm;
-  if (range == 0xFFFF) {
+  const bool rangeFresh =
+      range != 0xFFFF &&
+      static_cast<uint32_t>(now - latestRangeMs) <= Config::TOF_FRESHNESS_MS;
+  if (!rangeFresh) {
     Serial.println("VL53L1X: no valid reading (timeout)");
   } else {
     Serial.printf("VL53L1X distance: %u mm\n", range);
