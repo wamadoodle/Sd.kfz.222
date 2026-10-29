@@ -38,6 +38,12 @@
     }
     .connect { margin: 18px 0 14px; width: 100%; background: #a7ad78; color: #22231b; font-weight: 750; border: 0; }
     .stop-button { width: 100%; min-height: 48px; border: 1px solid #a85846; border-radius: 12px; background: #783f34; color: #fff0e8; font-weight: 800; letter-spacing: .08em; }
+    .demo-button {
+      width: 100%; min-height: 50px; border: 1px solid #87915f;
+      border-radius: 12px; background: #414331; color: #e4ddb0;
+      font-weight: 800; letter-spacing: .04em;
+    }
+    .demo-button.active { background: #a85846; border-color: #d0795b; color: #fff0e8; }
     button:disabled { opacity: .45; cursor: not-allowed; }
     .card { background: #37312b; border: 1px solid #5b5147; border-radius: 18px; padding: 15px; margin-top: 14px; }
     .section-title { display: flex; align-items: baseline; justify-content: space-between; margin: 0 0 12px; font-size: .98rem; }
@@ -176,6 +182,14 @@
         <div class="reading"><span class="reading-label">ToF sensor</span><span class="reading-value" id="tofValue">Unknown</span></div>
       </div>
     </section>
+
+    <section class="card">
+      <h2 class="section-title">Movement demo</h2>
+      <button class="demo-button" id="demoToggle" aria-pressed="false" disabled>
+        START MOVEMENT DEMO
+      </button>
+      <p class="notice">Runs forward, stop, backward, stop, left pivot, stop, right pivot, stop, then repeats. Each movement lasts 1 second and each stop lasts 0.5 seconds. Demo ignores obstacle readings and uses fixed motor speed. Test with the wheels raised and keep STOP accessible.</p>
+    </section>
     <div class="error" id="errorText" role="status" aria-live="polite"></div>
   </main>
 
@@ -191,7 +205,7 @@
         device: null, server: null, rx: null, tx: null,
         mode: "RC", tofAvailable: false, haveTelemetry: false,
         driveActive: false, driveX: 0, driveY: 0,
-        laser: false, music: false,
+        laser: false, music: false, demoActive: false,
         writeChain: Promise.resolve(), lastTelemetryAt: 0, laserTimer: 0,
         midiTracks: [], midiNotes: [], midiFileName: "", uploadAckResolver: null
       };
@@ -209,6 +223,7 @@
           button.disabled = !connected;
         });
         $("stopButton").disabled = !connected;
+        $("demoToggle").disabled = !connected;
         $("autoMode").disabled = !connected || !state.tofAvailable;
         $("uploadMidiButton").disabled =
             !connected || state.midiNotes.length === 0;
@@ -221,6 +236,7 @@
           state.haveTelemetry = false;
           state.laser = false;
           state.music = false;
+          state.demoActive = false;
           state.driveActive = false;
           clearTimeout(state.laserTimer);
           updateMode();
@@ -228,7 +244,50 @@
           updateToggle("musicToggle", false);
           releaseDrive();
         }
+        updateDemoUi();
         updateObstacleStatus("NA", state.tofAvailable);
+      }
+
+      function updateDemoUi() {
+        const button = $("demoToggle");
+        button.classList.toggle("active", state.demoActive);
+        button.setAttribute("aria-pressed", String(state.demoActive));
+        button.textContent = state.demoActive
+          ? "STOP MOVEMENT DEMO"
+          : "START MOVEMENT DEMO";
+        const controlsDisabled = state.demoActive;
+        $("rcMode").disabled = controlsDisabled || !state.server?.connected;
+        $("autoMode").disabled = controlsDisabled || !state.server?.connected ||
+          !state.tofAvailable;
+        document.querySelectorAll(".toggle").forEach((toggle) => {
+          toggle.disabled = controlsDisabled || !state.server?.connected;
+        });
+        $("driveStick").style.pointerEvents = controlsDisabled ? "none" : "";
+        $("midiFile").disabled = controlsDisabled;
+        $("midiTrack").disabled = controlsDisabled || state.midiTracks.length === 0;
+        $("uploadMidiButton").disabled = controlsDisabled ||
+          !state.server?.connected || state.midiNotes.length === 0;
+      }
+
+      async function toggleDemo() {
+        const next = !state.demoActive;
+        try {
+          await sendCommand(`DEMO,${next ? 1 : 0}`, true);
+          state.demoActive = next;
+          if (next) {
+            state.mode = "RC";
+            state.driveActive = false;
+            state.laser = false;
+            state.music = false;
+            clearTimeout(state.laserTimer);
+            updateMode();
+            updateToggle("laserToggle", false);
+            updateToggle("musicToggle", false);
+          }
+          updateDemoUi();
+        } catch (error) {
+          showError(error.message);
+        }
       }
 
       function updateMode() {
@@ -620,7 +679,7 @@
 
       async function disconnect() {
         if (state.rx && state.server?.connected) {
-          for (const command of ["J,0,0", "L,0", "M,0"]) {
+          for (const command of ["DEMO,0", "J,0,0", "L,0", "M,0"]) {
             try { await sendCommand(command); } catch { break; }
           }
         }
@@ -768,14 +827,17 @@
         try {
           await sendCommand("S");
           state.mode = "RC";
+          state.demoActive = false;
           state.laser = false;
           state.driveActive = false;
           clearTimeout(state.laserTimer);
           updateMode();
           updateToggle("laserToggle", false);
+          updateDemoUi();
           releaseDrive();
         } catch (error) { showError(error.message); }
       });
+      $("demoToggle").addEventListener("click", toggleDemo);
       $("rcMode").addEventListener("click", async () => {
         try {
           releaseDrive();

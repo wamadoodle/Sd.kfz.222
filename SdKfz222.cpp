@@ -39,6 +39,8 @@ constexpr uint32_t OBSTACLE_ALARM_DURATION_MS = 350;
 constexpr uint32_t AUTO_TURN_MS_PER_DEG = 7;
 constexpr int AUTO_TURN_DEGREES = 90;
 constexpr uint32_t AUTO_ADVANCE_MS = 400;
+constexpr uint32_t DEMO_MOVE_DURATION_MS = 1000;
+constexpr uint32_t DEMO_STOP_DURATION_MS = 500;
 constexpr size_t MAX_UPLOADED_MELODY_NOTES = 256;
 constexpr uint16_t MIN_UPLOADED_NOTE_DURATION_MS = 20;
 constexpr uint16_t MAX_UPLOADED_NOTE_DURATION_MS = 5000;
@@ -62,6 +64,17 @@ enum class RouteState : uint8_t {
   TurnSettling,
   Advancing,
   Hold
+};
+
+enum class DemoStep : uint8_t {
+  Forward,
+  StopAfterForward,
+  Backward,
+  StopAfterBackward,
+  Left,
+  StopAfterLeft,
+  Right,
+  StopAfterRight
 };
 
 class Motor {
@@ -106,6 +119,7 @@ volatile uint32_t latestRangeMs = 0;
 volatile bool tofAvailable = false;
 volatile bool bleConnected = false;
 bool autonomousMode = false;
+bool demoModeActive = false;
 uint32_t lastCommandMs = 0;
 uint32_t lastTelemetryMs = 0;
 uint32_t lastSerialRangeMs = 0;
@@ -120,6 +134,8 @@ uint32_t laserTurnedOnMs = 0;
 RouteState routeState = RouteState::Patrol;
 uint32_t routeActionStartedMs = 0;
 uint32_t routeActionDurationMs = 0;
+DemoStep demoStep = DemoStep::Forward;
+uint32_t demoStepStartedMs = 0;
 size_t melodyIndex = 0;
 uint32_t noteStartedMs = 0;
 Note uploadedMelody[Config::MAX_UPLOADED_MELODY_NOTES]{};
@@ -355,7 +371,98 @@ void beginRouteAdvance(uint32_t now) {
   routeActionStartedMs = now;
 }
 
+void applyDemoStep(uint32_t now) {
+  int8_t leftDirection = 0;
+  int8_t rightDirection = 0;
+  uint32_t duration = Config::DEMO_STOP_DURATION_MS;
+
+  switch (demoStep) {
+  case DemoStep::Forward:
+    leftDirection = 1;
+    rightDirection = 1;
+    duration = Config::DEMO_MOVE_DURATION_MS;
+    break;
+  case DemoStep::Backward:
+    leftDirection = -1;
+    rightDirection = -1;
+    duration = Config::DEMO_MOVE_DURATION_MS;
+    break;
+  case DemoStep::Left:
+    leftDirection = -1;
+    rightDirection = 1;
+    duration = Config::DEMO_MOVE_DURATION_MS;
+    break;
+  case DemoStep::Right:
+    leftDirection = 1;
+    rightDirection = -1;
+    duration = Config::DEMO_MOVE_DURATION_MS;
+    break;
+  case DemoStep::StopAfterForward:
+  case DemoStep::StopAfterBackward:
+  case DemoStep::StopAfterLeft:
+  case DemoStep::StopAfterRight:
+    stopDrive();
+    break;
+  }
+
+  if (leftDirection != 0 || rightDirection != 0) {
+    leftMotor.setDirection(leftDirection);
+    rightMotor.setDirection(rightDirection);
+    motorsEnabledByCommand = true;
+  }
+  demoStepStartedMs = now;
+  routeActionDurationMs = duration;
+  Serial.printf("Movement demo step %u\n", static_cast<unsigned>(demoStep));
+}
+
+void updateDemoMode() {
+  if (!demoModeActive) {
+    return;
+  }
+  if (!bleConnected) {
+    demoModeActive = false;
+    stopDrive();
+    return;
+  }
+  const uint32_t now = millis();
+  if (static_cast<uint32_t>(now - demoStepStartedMs) <
+      routeActionDurationMs) {
+    return;
+  }
+
+  switch (demoStep) {
+  case DemoStep::Forward:
+    demoStep = DemoStep::StopAfterForward;
+    break;
+  case DemoStep::StopAfterForward:
+    demoStep = DemoStep::Backward;
+    break;
+  case DemoStep::Backward:
+    demoStep = DemoStep::StopAfterBackward;
+    break;
+  case DemoStep::StopAfterBackward:
+    demoStep = DemoStep::Left;
+    break;
+  case DemoStep::Left:
+    demoStep = DemoStep::StopAfterLeft;
+    break;
+  case DemoStep::StopAfterLeft:
+    demoStep = DemoStep::Right;
+    break;
+  case DemoStep::Right:
+    demoStep = DemoStep::StopAfterRight;
+    break;
+  case DemoStep::StopAfterRight:
+    demoStep = DemoStep::Forward;
+    break;
+  }
+  applyDemoStep(now);
+}
+
 void updateAutoDrive() {
+  if (demoModeActive) {
+    return;
+  }
   const uint32_t now = millis();
   if (!autonomousMode) {
     if (routeState != RouteState::Patrol && routeState != RouteState::Hold) {
@@ -455,12 +562,43 @@ void updateAutoDrive() {
 }
 
 void processCommand(const char *packet) {
+  if (strcmp(packet, "DEMO,1") == 0) {
+    if (!bleConnected) {
+      return;
+    }
+    autonomousMode = false;
+    routeState = RouteState::Patrol;
+    stopDrive();
+    setLaser(false);
+    stopMelody();
+    obstacleAlarmActive = false;
+    noTone(Config::BUZZER_PIN);
+    demoModeActive = true;
+    demoStep = DemoStep::Forward;
+    applyDemoStep(millis());
+    Serial.println("Movement demo started; obstacle sensing is ignored");
+    return;
+  }
+
+  if (strcmp(packet, "DEMO,0") == 0) {
+    demoModeActive = false;
+    stopDrive();
+    routeState = RouteState::Patrol;
+    Serial.println("Movement demo stopped");
+    return;
+  }
+
   if (strcmp(packet, "S") == 0) {
+    demoModeActive = false;
     autonomousMode = false;
     stopDrive();
     setLaser(false);
     routeState = RouteState::Hold;
     lastCommandMs = millis();
+    return;
+  }
+
+  if (demoModeActive) {
     return;
   }
 
@@ -666,6 +804,7 @@ void receiveCommands() {
 
 void enforceCommandTimeout() {
   if (!bleConnected) {
+    demoModeActive = false;
     autonomousMode = false;
     stopDrive();
     setLaser(false);
@@ -679,7 +818,7 @@ void enforceCommandTimeout() {
     Serial.println("Laser automatically turned off after safety timeout");
   }
   if (static_cast<uint32_t>(now - lastCommandMs) > Config::COMMAND_TIMEOUT_MS) {
-    if (motorsEnabledByCommand && !autonomousMode) {
+    if (motorsEnabledByCommand && !autonomousMode && !demoModeActive) {
       stopDrive();
     }
     if (!autonomousMode &&
@@ -788,6 +927,7 @@ void setup() {
 
 void loop() {
   receiveCommands();
+  updateDemoMode();
   updateAutoDrive();
   enforceCommandTimeout();
   updateObstacleAlarm();
